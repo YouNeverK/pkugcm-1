@@ -499,13 +499,12 @@ use pumamod
 
 
 open(nud,file=puma_diag)   ! pass (simple)  ! opendiag简化而来
-call read_resolution       ! pass (simple)  ! 读取2个关键维度参数 NLAT, NLEV
+call read_resolution       ! pass (simple)  ! 从命令行读取2个参数: NLAT, NLEV
 call resolution            ! pass (simple)  ! 设置SP和GP的分辨率参数
 call allocate_arrays       ! pass (simple)  ! 分配SP和GP所有动态数组的内存空间
 call prolog                ! pass (complex) ! 初始化 ......
 call master                ! pass (complex) ! Key: gridpoint & spectral
 call epilog                ! pass (simple)  ! 终止化 关闭_output; 写restart; 显示时间信息
-close(nud)
 
 end program puma_main
 
@@ -516,13 +515,13 @@ end program puma_main
 subroutine read_resolution
    use pumamod
    implicit none
-   integer :: ios
-   namelist /pkugcm_res/ nlev, nlat
-   open(13,file=puma_namelist,iostat=ios)
-   if (ios == 0) then
-      read (13, pkugcm_res)
-      close(13)
-   end if
+
+   character (80) :: ylat
+   character (80) :: ylev
+   call get_command_argument(1,ylat)
+   call get_command_argument(2,ylev)
+   read(ylat,*) nlat
+   read(ylev,*) nlev
 end subroutine
 
 
@@ -735,8 +734,8 @@ integer  :: jlat              ! loop var
    !call ppp_interface  完全不必要
    call initpm
 
-write(nud,*) "LSELECT =", lselect       ! check if zonal-filter work after calling initpm
-write(nud,*) "LSPECSEL = ", lspecsel    ! check if sp-truncator work after calling initpm
+print *, "LSELECT =", lselect       ! check if zonal-filter work after calling initpm
+print *, "LSPECSEL = ", lspecsel    ! check if sp-truncator work after calling initpm
 
    call initsi
    call altlat(csq,NLAT) ! csq -> alternating grid
@@ -914,13 +913,13 @@ do jstep = 1 , nrun
    !if (mod(nstep,ndiag )==0) then
       call ntodat(nstep,tmpstr)
       !$---acc update self(gu)
-      write(nud,"(a20,i10,2f10.4)") tmpstr, nstep, maxval(gu), minval(gu)   ! print info: date/time, timestep, Umax, Umin
+      print "(a20,i10,2f10.4)", tmpstr, nstep, maxval(gu), minval(gu)   ! print info: date/time, timestep, Umax, Umin
    !end if
 
    if (mod(nstep,nafter)==0 .and. noutput==2) then
       !$---acc update self(sp,sd,sz,st,gu,gv)
       call io_write_output
-      write(nud,*) "writting ... outputs"
+      print *, "writting ... outputs"
    end if
 enddo
 
@@ -1144,12 +1143,6 @@ write(nud,*) "+---------------------------------------------------+"
 
 !     =================
 !     SUBROUTINE INITFD
-!     关键初始化过程 读入外置的关键5变量
-!        129   surface orographic height     ---> iread1   (lev=1)
-!        134   surface pressure              ---> iread2   (lev=1)
-!        121   restortion 1 (sr1) (Sea Cyc)  ---> iread3   (NLEV)
-!        122   restortian 2 (sr2) (Sea Cyc)  ---> iread4   (NLEV)
-!        123   radiative relax. time scale   ---> iread123 (NLEV)    scaling & non-dimensional
 !     =================
 
       subroutine initfd
@@ -1163,28 +1156,27 @@ write(nud,*) "+---------------------------------------------------+"
       if (nkits < 1) nkits = 1
 
 !     Look for start data and read them if there
-
-      call read_surf(129,so,    1,iread1)    ! 读进来直接转谱空间
-      call read_surf(134,sp,    1,iread2)
-      call read_surf(121,sr1,NLEV,iread3)
-      call read_surf(122,sr2,NLEV,iread4)
-      call read_vargp(123,NLEV,iread123)     ! 读进来只做无量纲化处理
-
-      !if (mypid == NROOT .and. iread123 == 0) then
-      if (iread123 == 0) then
-         if (nhelsua > 1) then
-            write(nud,*) "*** ERROR no *_surf_0123.sra file for Held&Suarez"
-            stop
-         endif
-      endif
-  
-      ! external diabatic heating 
-      if (ndiagp > 0) then  
+      !wcg_info: 
+      ! - Original code(v2017.05.03) uses 'nhelsua' and 'ndiagp' to
+      !   determine whether read in data in grid format and
+      !   calculate heating term in grid space. But the logic seems
+      !   a bit complex and existence of 'ndiagp' are not necessary.
+      ! - Modifiations are following:
+      !     1. drop namelist 'ndiagp' and use 'nhelsua' to determine
+      !     whether the program read in data in grid format or not. 
+      ! - So the process of initfd is
+      !     a. Read in topo and surface pressure data and relaxation
+      !     temperature. If one of them does't exist, then use setzt 
+      !     to intialize those parameter.
+      !     b. If (nhelsua>1) is not true, then use build-in 
+      !     relaxation time function. If (nhelsua>1) is true, then 
+      !     read relaxation temperature and time in grid format for
+      !     later use in diagp(subroutine) in section 6 of 
+      !     subroutine spectral.  
+      if (nhelsua > 1) then  
          call read_vargp(121,NLEV,iread121)
          call read_vargp(122,NLEV,iread122)
-         if (.not. allocated(gtdamp)) then
-            call read_vargp(123,NLEV,iread123)
-         endif
+         call read_vargp(123,NLEV,iread123)
          !if (mypid == NROOT) then
             if (iread121==0 .or. iread122==0 .or. iread123==0) then
                write(nud,*) "*** ERROR not all fields (121,122,123) for grid point heating found"
@@ -1193,7 +1185,13 @@ write(nud,*) "+---------------------------------------------------+"
          !endif
       endif
 
-      ! external convective heating 
+      call read_surf(129,so,    1,iread1)
+      call read_surf(134,sp,    1,iread2)
+      call read_surf(121,sr1,NLEV,iread3)
+      call read_surf(122,sr2,NLEV,iread4)
+      !if (mypid == NROOT .and. iread123 == 0) then
+   
+
       if (nconv > 0) then
          call read_vargp(124,NLEV,iread124)
          call read_vargp(125,NLEV,iread125)
@@ -1207,7 +1205,6 @@ write(nud,*) "+---------------------------------------------------+"
       endif
 
       !if (mypid == NROOT) then
-         ! XW: 4个文件必须同时存在并使用才行
          if (iread1==0 .or. iread2==0 .or. iread3==0 .or. iread4==0) then
             call setzt ! setup for aqua-planet
          else
@@ -1218,6 +1215,9 @@ write(nud,*) "+---------------------------------------------------+"
             sr2(:,:) = sr2(:,:) / ct  ! descale from [K]
             sr1(1,:) = sr1(1,:) - t0(:) * sqrt(2.0) ! subtract profile
             write(nud,'(a,f8.2,a)') ' Mean of Ps = ',0.01*psmean, '[hPa]'
+            write(nud,*) " "
+            write(nud,*) "Found all files needed outside "
+            write(nud,*) "Please check your input carefully "
          endif
       !endif
 
@@ -1256,7 +1256,7 @@ write(nud,*) "+---------------------------------------------------+"
 !     This workaround is necessaray, because allocatable arrays are
 !     not allowed in namelists for FORTRAN versions < F2003
 
-      integer, parameter :: MAXSELZW = 170    ! XW: change from 21 to 42 to 85 to 170
+      integer, parameter :: MAXSELZW = 85
       integer, parameter :: MAXSELSP = ((MAXSELZW+1) * (MAXSELZW+2)) / 2
       integer :: nselect(0:MAXSELZW) = 1      ! NSELECT can be used up tp T42
       integer :: nspecsel(MAXSELSP)  = 1      ! Default setting: all modes active
@@ -1282,7 +1282,6 @@ write(nud,*) "+---------------------------------------------------+"
       , rotspd  , seed    , sid_day , sigmah  , sigmax  , dcsponge&
       , spstep  , t0k     , tauf    , taur    &
       , tac     , tauta   , tauts   , tgr     , ww_time
-      !--- XW add below variables
 
       open(13,file=puma_namelist,iostat=ios)
       if (ios == 0) then
@@ -2125,7 +2124,6 @@ write(nud,*) "+---------------------------------------------------+"
          stop
       end select
 
-      ! 写海平面气压的初始场 暂时可以关闭
       if (nwspini == 1) then
          open(71, file=puma_sp_init, form='unformatted')
          write(71) sp(:)
@@ -2293,10 +2291,6 @@ write(nud,*) "+---------------------------------------------------+"
             read (65,*) zgp(:,jlev)
          enddo
          close(65)
-
-         ! XW(May/17/2017): write min/max information
-         write(nud,*) "checking ...... [ Min --> Max ] =", minval(zgp), maxval(zgp)
-
          if (kcode == 134) then
             write(nud,*) "Converting Ps to LnPs"
             zscale   = log(100.0) - log(psurf) ! Input [hPa] / PSURF [Pa]
@@ -2355,10 +2349,6 @@ write(nud,*) "+---------------------------------------------------+"
             read (65,*) zgp(:,jlev)
          enddo
          close(65)
-
-         ! XW(May/17/2017): write min/max information
-         write(nud,*) "checking ...... [ Min --> Max ] =", minval(zgp), maxval(zgp)
-
          call reg2alt(zgp,klev)
       !endif ! (mypid == NROOT)
 
@@ -2393,7 +2383,11 @@ write(nud,*) "+---------------------------------------------------+"
          case(123)
             !--- non-dimensionalize radiative relaxation time scale
             !if (mypid == NROOT) then
-               zgp(:,:) = zgp(:,:)/ww_scale
+            !wcg_info:
+            !   - gtdamp used as the reciprocal of relaxation time
+            !     in subroutine diagp. Original code(v20170503) 
+            !     didn't inverse that.
+                zgp(:,:) = 1/zgp(:,:)/ww_scale
             !endif
             allocate(gtdamp(nhor,klev))
             !if (mypid == NROOT) then
@@ -3699,11 +3693,14 @@ pure  subroutine calcgp(gpm,   gtn,gvp,gfu,gfv,    & ! gpm进 gtn/gvp/gfu/gfv出
 !        fric = friction
 !        zampl = annual cycle
 
-      zampl = cos((real(nstep)-pac)*tac)              ! XW (2017-5-17): zampl --> cos(julian)
-
-      if (nhelsua == 0 .or. nhelsua == 1) then
+      zampl = cos((real(nstep)-pac)*tac)
+      !wcg_info: 
+      !     - ('nhelsua' <= 1) means use build-in 
+      !       relaxation time and calcualte the Newtonian Cooling 
+      !       in spectral space.
+      if (nhelsua <= 1) then
          do jlev=1,NLEV
-            zsrp(:)=srp1(:,jlev)+srp2(:,jlev)*zampl   ! XW (2017-5-17): T=Tann+Tcyc*cos(julian)
+            zsrp(:)=srp1(:,jlev)+srp2(:,jlev)*zampl
             sdt(:,jlev) =  sdp(:,jlev) * (sak(1:NSPP) - fric(jlev))
             szt(:,jlev) =  szp(:,jlev) * (sak(1:NSPP) - fric(jlev))
             stt(:,jlev) = (zsrp(:) - stp(:,jlev)) * damp(jlev) + stp(:,jlev) * sak(1:NSPP)
@@ -3720,19 +3717,27 @@ pure  subroutine calcgp(gpm,   gtn,gvp,gfu,gfv,    & ! gpm进 gtn/gvp/gfu/gfv出
       !       zszte(:,jlev,2) =  szp(:,jlev) * sak(1:NSPP)
       !      endif
          enddo
-      !elseif (nhelsua == 2 .or. nhelsua == 3 .or. ndiagp > 0) then     ! checked: ndiagp=0
-      !   if (ndiagp == 0) then
-      !      call heatgp(zampl)  ! stt(:,:) = Newtonian cooling
-      !   else
-      !      call diagp(zampl)  ! stt(:,:) = Newtonian cooling
-      !   endif
+      !wcg_info: 
+      !     - 1. Uncoment this part. 
+      !       ('nhelsua' > 1) means use subroutine diagp 
+      !       to calcualte the Newtonian Cooling in grid space.
+      !     - 2. Remove the part that call heatgp to calcualte 
+      !       the Newtonian Cooling in spectral space, since 
+      !       subroutine heatgp transform relaxation temperature
+      !       from spectral space to grid space each step, which is
+      !       is not necessary.
+      elseif (nhelsua > 1 ) then   
+          call diagp(zampl)  ! stt(:,:) = Newtonian cooling
+      
       !   if(nenergy > 0) then
       !    zstte(:,:,2)=stt(:,:)
       !   endif
-      !   do jlev=1,NLEV
-      !      sdt(:,jlev) = sdp(:,jlev) * (sak(1:NSPP) - fric(jlev))
-      !      szt(:,jlev) = szp(:,jlev) * (sak(1:NSPP) - fric(jlev))
-      !      stt(:,jlev) = stt(:,jlev) + stp(:,jlev) * sak(1:NSPP)
+      !wcg_info: 
+      !     - 1. Uncoment this part 
+         do jlev=1,NLEV
+            sdt(:,jlev) = sdp(:,jlev) * (sak(1:NSPP) - fric(jlev))
+            szt(:,jlev) = szp(:,jlev) * (sak(1:NSPP) - fric(jlev))
+            stt(:,jlev) = stt(:,jlev) + stp(:,jlev) * sak(1:NSPP)
       !      if(nenergy > 0) then
       !       zstte(:,jlev,3)=stp(:,jlev)*sak(1:NSPP)
       !      endif
@@ -3742,7 +3747,7 @@ pure  subroutine calcgp(gpm,   gtn,gvp,gfu,gfv,    & ! gpm进 gtn/gvp/gfu/gfv出
       !       zsdte(:,jlev,2) =  sdp(:,jlev) * sak(1:NSPP)
       !       zszte(:,jlev,2) =  szp(:,jlev) * sak(1:NSPP)
       !      endif
-      !   enddo
+         enddo
       endif
 
 !        Conserve ln(ps) by forcing mode(0,0) to zero
